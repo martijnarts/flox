@@ -667,10 +667,9 @@ mod tests {
     /// `cli/flox/doc/manifest.toml.md` to include the new schema version.
     #[test]
     fn man_page_lists_all_schema_versions() {
-        let doc_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../flox/doc/manifest.toml.md");
-        let contents =
-            std::fs::read_to_string(&doc_path).expect("failed to read manifest.toml.md");
+        let doc_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../flox/doc/manifest.toml.md");
+        let contents = std::fs::read_to_string(&doc_path).expect("failed to read manifest.toml.md");
 
         for version in KnownSchemaVersion::iter() {
             // V1 uses the legacy "version = 1" format, not "schema-version",
