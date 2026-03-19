@@ -966,7 +966,7 @@ fn update_systems(
             debug!("creating new [options] table");
             TomlEditError::MalformedOptionsTable(options_field_type)
         })?;
-        options_table.insert("systems", toml_array_of_strings(systems).into());
+        table_like_set_string_array(options_table, "systems", systems);
     } else if let Some(options_field) = raw.get_mut("options") {
         let options_field_type = options_field.type_name().into();
         let options_table = options_field
@@ -1097,6 +1097,16 @@ fn update_descriptor(
     Ok(())
 }
 
+/// Set a string array in a `TableLike`, patching the existing array in place
+/// when one exists so that formatting is preserved.
+fn table_like_set_string_array(raw: &mut dyn TableLike, key: &str, strs: &[String]) {
+    if let Some(arr) = raw.get_mut(key).and_then(|v| v.as_array_mut()) {
+        patch_string_array(arr, strs);
+    } else {
+        table_like_set(raw, key, toml_array_of_strings(strs).into());
+    }
+}
+
 /// Insert or update a key-value pair in a `TableLike`, preserving any existing
 /// key decor (prefix comments) and value decor (inline/suffix comments).
 fn table_like_set(raw: &mut dyn TableLike, key: &str, new_value: Item) {
@@ -1202,6 +1212,36 @@ fn toml_array_of_strings(strs: &[String]) -> Value {
     Value::Array(strs.iter().map(toml_string).collect::<Array>())
 }
 
+/// Update a string array in place, preserving formatting of unchanged elements.
+fn patch_string_array(arr: &mut Array, expected: &[String]) {
+    // Trim trailing elements that are no longer needed.
+    while arr.len() > expected.len() {
+        arr.remove(arr.len() - 1);
+    }
+
+    for (i, s) in expected.iter().enumerate() {
+        if i < arr.len() {
+            // Existing position: skip if unchanged, otherwise replace the
+            // value while copying decor so whitespace/comments are kept.
+            if arr.get(i).and_then(|v| v.as_str()) != Some(s.as_str()) {
+                let mut new_val = toml_string(s);
+                if let Some(old_val) = arr.get(i) {
+                    *new_val.decor_mut() = old_val.decor().clone();
+                }
+                arr.replace(i, new_val);
+            }
+        } else {
+            // New position: append, inheriting decor from the preceding
+            // element so that multi-line style is maintained.
+            let mut val = toml_string(s);
+            if let Some(last) = i.checked_sub(1).and_then(|j| arr.get(j)) {
+                *val.decor_mut() = last.decor().clone();
+            }
+            arr.push_formatted(val);
+        }
+    }
+}
+
 fn toml_priority(p: u64) -> Value {
     Value::Integer(Formatted::new(p as i64))
 }
@@ -1245,7 +1285,7 @@ fn update_v1_catalog_descriptor(
         table_like_remove(raw, "version");
     }
     if let Some(systems) = systems {
-        table_like_set(raw, "systems", toml_array_of_strings(systems).into());
+        table_like_set_string_array(raw, "systems", systems);
     } else {
         table_like_remove(raw, "systems");
     }
@@ -1264,7 +1304,7 @@ fn update_v1_flake_descriptor(raw: &mut dyn TableLike, descriptor: &v1::PackageD
         table_like_remove(raw, "priority");
     }
     if let Some(systems) = systems {
-        table_like_set(raw, "systems", toml_array_of_strings(systems).into());
+        table_like_set_string_array(raw, "systems", systems);
     } else {
         table_like_remove(raw, "systems");
     }
@@ -1286,7 +1326,7 @@ fn update_store_path_descriptor(
         table_like_remove(raw, "priority");
     }
     if let Some(systems) = systems {
-        table_like_set(raw, "systems", toml_array_of_strings(systems).into());
+        table_like_set_string_array(raw, "systems", systems);
     } else {
         table_like_remove(raw, "systems");
     }
@@ -1321,17 +1361,17 @@ fn update_v1_10_0_catalog_descriptor(
         table_like_remove(raw, "version");
     }
     if let Some(systems) = systems {
-        table_like_set(raw, "systems", toml_array_of_strings(systems).into());
+        table_like_set_string_array(raw, "systems", systems);
     } else {
         table_like_remove(raw, "systems");
     }
     if let Some(outputs) = outputs {
         match outputs {
             v1_10_0::SelectedOutputs::All(_) => {
-                table_like_set(raw, "outputs", toml_string("all").into());
+                raw.insert("outputs", toml_string("all").into());
             },
             v1_10_0::SelectedOutputs::Specific(items) => {
-                table_like_set(raw, "outputs", toml_array_of_strings(items).into());
+                table_like_set_string_array(raw, "outputs", items);
             },
         }
     } else {
@@ -1356,21 +1396,21 @@ fn update_v1_10_0_flake_descriptor(
         raw.remove("priority");
     }
     if let Some(systems) = systems {
-        raw.insert("systems", toml_array_of_strings(systems).into());
+        table_like_set_string_array(raw, "systems", systems);
     } else {
-        raw.remove("systems");
+        table_like_remove(raw, "systems");
     }
     if let Some(outputs) = outputs {
         match outputs {
             v1_10_0::SelectedOutputs::All(_) => {
-                raw.insert("outputs", toml_string("all").into());
+                table_like_set(raw, "outputs", toml_string("all").into());
             },
             v1_10_0::SelectedOutputs::Specific(items) => {
-                raw.insert("outputs", toml_array_of_strings(items).into());
+                table_like_set_string_array(raw, "outputs", items);
             },
         }
     } else {
-        raw.remove("outputs");
+        table_like_remove(raw, "outputs");
     }
 }
 
@@ -2070,6 +2110,137 @@ curl.outputs = [\"bin\", \"man\"]
         let opts = manifest.inner.raw["options"].clone();
         assert!(opts["allow"]["unfree"].as_bool().unwrap());
         assert!(opts.get("systems").is_none());
+    }
+
+    #[test]
+    fn update_systems_preserves_multiline_array_formatting() {
+        let body = indoc! {r#"
+            [options]
+            systems = [
+              "aarch64-darwin",
+              "x86_64-darwin",
+            ]
+        "#};
+        let mut manifest = Manifest::parse_toml_typed(with_latest_schema(body)).unwrap();
+        manifest.update_systems().unwrap();
+        let output = manifest.inner.raw.to_string();
+        assert!(
+            output.contains(body),
+            "multi-line systems should be preserved, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn update_systems_preserves_multiline_formatting_when_items_added() {
+        let toml_str = with_latest_schema(indoc! {r#"
+            [options]
+            systems = [
+              "aarch64-darwin",
+              "x86_64-darwin",
+            ]
+        "#});
+        let mut manifest = Manifest::parse_toml_typed(&toml_str).unwrap();
+        manifest.options_mut().systems = Some(vec![
+            "aarch64-darwin".to_string(),
+            "x86_64-darwin".to_string(),
+            "x86_64-linux".to_string(),
+        ]);
+        manifest.update_systems().unwrap();
+        let output = manifest.inner.raw.to_string();
+        expect![[r#"
+            schema-version = "1.10.0"
+
+            [options]
+            systems = [
+              "aarch64-darwin",
+              "x86_64-darwin",
+              "x86_64-linux",
+            ]
+
+        "#]]
+        .assert_eq(&output);
+    }
+
+    #[test]
+    fn update_systems_preserves_multiline_formatting_when_items_removed() {
+        let toml_str = with_latest_schema(indoc! {r#"
+            [options]
+            systems = [
+              "aarch64-darwin",
+              "x86_64-darwin",
+              "x86_64-linux",
+            ]
+        "#});
+        let mut manifest = Manifest::parse_toml_typed(&toml_str).unwrap();
+        manifest.options_mut().systems = Some(vec![
+            "aarch64-darwin".to_string(),
+            "x86_64-darwin".to_string(),
+        ]);
+        manifest.update_systems().unwrap();
+        let output = manifest.inner.raw.to_string();
+        expect![[r#"
+            schema-version = "1.10.0"
+
+            [options]
+            systems = [
+              "aarch64-darwin",
+              "x86_64-darwin",
+            ]
+
+        "#]]
+        .assert_eq(&output);
+    }
+
+    #[test]
+    fn update_systems_preserves_multiline_formatting_when_items_modified() {
+        let toml_str = with_latest_schema(indoc! {r#"
+            [options]
+            systems = [
+              "aarch64-darwin",
+              "x86_64-darwin",
+            ]
+        "#});
+        let mut manifest = Manifest::parse_toml_typed(&toml_str).unwrap();
+        manifest.options_mut().systems = Some(vec![
+            "aarch64-darwin".to_string(),
+            "x86_64-linux".to_string(),
+        ]);
+        manifest.update_systems().unwrap();
+        let output = manifest.inner.raw.to_string();
+        expect![[r#"
+            schema-version = "1.10.0"
+
+            [options]
+            systems = [
+              "aarch64-darwin",
+              "x86_64-linux",
+            ]
+
+        "#]]
+        .assert_eq(&output);
+    }
+
+    #[test]
+    fn update_packages_preserves_multiline_arrays() {
+        let body = indoc! {r#"
+            [install]
+            hello.pkg-path = "hello"
+            hello.systems = [
+              "aarch64-darwin",
+              "x86_64-darwin",
+            ]
+            hello.outputs = [
+              "out",
+              "man",
+            ]
+        "#};
+        let mut manifest = Manifest::parse_toml_typed(with_latest_schema(body)).unwrap();
+        manifest.update_raw_packages_from_typed_manifest().unwrap();
+        let output = manifest.inner.raw.to_string();
+        assert!(
+            output.contains(body),
+            "multi-line per-package arrays should be preserved, got:\n{output}"
+        );
     }
 
     #[test]
