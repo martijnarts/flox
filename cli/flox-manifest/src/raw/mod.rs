@@ -1208,6 +1208,31 @@ fn toml_string(s: impl AsRef<str>) -> Value {
     Value::String(Formatted::new(s.as_ref().to_string()))
 }
 
+/// Extract only the indentation (whitespace) from a `Decor` prefix, stripping
+/// any comment lines.
+///
+/// In `toml_edit`, the prefix is a single string such as `"\n  # comment\n  "`
+/// where comments and whitespace are merged.  We want just the trailing `"\n "`
+/// so that appended elements inherit the indentation without duplicating
+/// comments.
+fn indent_only_decor(decor: &toml_edit::Decor) -> toml_edit::Decor {
+    let Some(prefix) = decor.prefix().and_then(|r| r.as_str()) else {
+        return decor.clone();
+    };
+
+    // Find the last newline — everything from there onward is the
+    // indentation of the value itself.
+    let indent_prefix = match prefix.rfind('\n') {
+        Some(pos) => &prefix[pos..],
+        None => prefix,
+    };
+    let mut indent_decor = toml_edit::Decor::new(indent_prefix, "");
+    if let Some(suffix) = decor.suffix().and_then(|r| r.as_str()) {
+        indent_decor.set_suffix(suffix);
+    }
+    indent_decor
+}
+
 fn toml_array_of_strings(strs: &[String]) -> Value {
     Value::Array(strs.iter().map(toml_string).collect::<Array>())
 }
@@ -1222,20 +1247,21 @@ fn patch_string_array(arr: &mut Array, expected: &[String]) {
     for (i, s) in expected.iter().enumerate() {
         if i < arr.len() {
             // Existing position: skip if unchanged, otherwise replace the
-            // value while copying decor so whitespace/comments are kept.
+            // value while copying only indentation (not comments) from the
+            // old element so that stale comments aren't preserved.
             if arr.get(i).and_then(|v| v.as_str()) != Some(s.as_str()) {
                 let mut new_val = toml_string(s);
                 if let Some(old_val) = arr.get(i) {
-                    *new_val.decor_mut() = old_val.decor().clone();
+                    *new_val.decor_mut() = indent_only_decor(old_val.decor());
                 }
-                arr.replace(i, new_val);
+                arr.replace_formatted(i, new_val);
             }
         } else {
-            // New position: append, inheriting decor from the preceding
-            // element so that multi-line style is maintained.
+            // New position: append, inheriting indentation (not comments)
+            // from the preceding element so that multi-line style is maintained.
             let mut val = toml_string(s);
             if let Some(last) = i.checked_sub(1).and_then(|j| arr.get(j)) {
-                *val.decor_mut() = last.decor().clone();
+                *val.decor_mut() = indent_only_decor(last.decor());
             }
             arr.push_formatted(val);
         }
@@ -2135,7 +2161,9 @@ curl.outputs = [\"bin\", \"man\"]
         let toml_str = with_latest_schema(indoc! {r#"
             [options]
             systems = [
+              # aarch64-darwin
               "aarch64-darwin",
+              # x86_64-darwin
               "x86_64-darwin",
             ]
         "#});
@@ -2152,7 +2180,9 @@ curl.outputs = [\"bin\", \"man\"]
 
             [options]
             systems = [
+              # aarch64-darwin
               "aarch64-darwin",
+              # x86_64-darwin
               "x86_64-darwin",
               "x86_64-linux",
             ]
@@ -2166,8 +2196,11 @@ curl.outputs = [\"bin\", \"man\"]
         let toml_str = with_latest_schema(indoc! {r#"
             [options]
             systems = [
+              # aarch64-darwin
               "aarch64-darwin",
+              # x86_64-darwin
               "x86_64-darwin",
+              # x86_64-linux
               "x86_64-linux",
             ]
         "#});
@@ -2183,7 +2216,9 @@ curl.outputs = [\"bin\", \"man\"]
 
             [options]
             systems = [
+              # aarch64-darwin
               "aarch64-darwin",
+              # x86_64-darwin
               "x86_64-darwin",
             ]
 
@@ -2196,7 +2231,9 @@ curl.outputs = [\"bin\", \"man\"]
         let toml_str = with_latest_schema(indoc! {r#"
             [options]
             systems = [
+              # aarch64-darwin
               "aarch64-darwin",
+              # x86_64-darwin
               "x86_64-darwin",
             ]
         "#});
@@ -2212,6 +2249,7 @@ curl.outputs = [\"bin\", \"man\"]
 
             [options]
             systems = [
+              # aarch64-darwin
               "aarch64-darwin",
               "x86_64-linux",
             ]
